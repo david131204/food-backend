@@ -19,6 +19,8 @@ app.get("/foods/search", async (req, res) => {
       return res.status(400).json({ error: "Missing search query" });
     }
 
+    const searchTerm = q.trim().toLowerCase();
+
     const response = await fetch("https://api.nal.usda.gov/fdc/v1/foods/search", {
       method: "POST",
       headers: {
@@ -26,8 +28,9 @@ app.get("/foods/search", async (req, res) => {
         "X-Api-Key": process.env.USDA_API_KEY,
       },
       body: JSON.stringify({
-        query: q,
-        pageSize: 10,
+        query: searchTerm,
+        pageSize: 100,
+        dataType: ["Foundation", "SR Legacy", "Survey (FNDDS)", "Branded"],
       }),
     });
 
@@ -38,31 +41,70 @@ app.get("/foods/search", async (req, res) => {
 
     const result = await response.json();
 
-   const foods = (result.foods || [])
-  .filter(item => !item.brandOwner) 
-  .slice(0, 10)
-  .map((item) => {
-      const nutrients = item.foodNutrients || [];
+    const foods = (result.foods || [])
+      .filter((item) => {
+        const nutrients = item.foodNutrients || [];
 
-      const getNutrient = (name) => {
-        const found = nutrients.find(
-          (n) => n.nutrientName?.toLowerCase() === name.toLowerCase()
+        const energy = nutrients.find(
+          (n) =>
+            n.nutrientName?.toLowerCase() === "energy" &&
+            n.unitName?.toLowerCase() === "kcal"
         );
-        return found?.value ?? 0;
-      };
 
-      return {
-        id: String(item.fdcId),
-        source: "usda",
-        name: item.description,
-        brand: item.brandOwner || null,
-        servingBasis: "100g",
-        caloriesPer100g: getNutrient("Energy"),
-        proteinPer100g: getNutrient("Protein"),
-        carbsPer100g: getNutrient("Carbohydrate, by difference"),
-        fatPer100g: getNutrient("Total lipid (fat)"),
-      };
-    });
+        return energy && energy.value > 0;
+      })
+      .sort((a, b) => {
+        const aName = a.description.toLowerCase();
+        const bName = b.description.toLowerCase();
+
+        // prioritise results that contain the search words (any order)
+        const aMatch = searchTerm.split(" ").every(word => aName.includes(word));
+        const bMatch = searchTerm.split(" ").every(word => bName.includes(word));
+
+        if (aMatch && !bMatch) return -1;
+        if (!aMatch && bMatch) return 1;
+
+        // prioritise non-branded foods
+        const aBranded = a.brandOwner || a.brandName;
+        const bBranded = b.brandOwner || b.brandName;
+
+        if (!aBranded && bBranded) return -1;
+        if (aBranded && !bBranded) return 1;
+
+        return aName.length - bName.length;
+      })
+      .slice(0, 10)
+      .map((item) => {
+        const nutrients = item.foodNutrients || [];
+
+        const getNutrient = (name, unit = null) => {
+          const found = nutrients.find((n) => {
+            const sameName =
+              n.nutrientName?.toLowerCase() === name.toLowerCase();
+
+            if (!unit) return sameName;
+
+            return (
+              sameName &&
+              n.unitName?.toLowerCase() === unit.toLowerCase()
+            );
+          });
+
+          return found?.value ?? 0;
+        };
+
+        return {
+          id: String(item.fdcId),
+          source: "usda",
+          name: item.description,
+          brand: item.brandOwner || item.brandName || null,
+          servingBasis: "100g",
+          caloriesPer100g: getNutrient("Energy", "KCAL"),
+          proteinPer100g: getNutrient("Protein"),
+          carbsPer100g: getNutrient("Carbohydrate, by difference"),
+          fatPer100g: getNutrient("Total lipid (fat)"),
+        };
+      });
 
     res.json(foods);
   } catch (error) {
